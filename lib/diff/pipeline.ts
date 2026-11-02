@@ -1,0 +1,211 @@
+/**
+ * The end-to-end diff pipeline: converts git diffs into labelled
+ * declaration-level change data.
+ *
+ * @remarks
+ * Feeds on parsed file pairs from the diff services and produces
+ * labelled declarations, counts, and a status for each file.
+ *
+ * @packageDocumentation
+ */
+import type { AnalysisResult } from '@/lib/analysis/types';
+import type {
+  GitAnalysisResult,
+  LabelledDeclaration,
+  DiffResponse,
+} from './types';
+import { listChangedTsFiles, resolveMergeBase, type ChangedFile } from './git-diff';
+import { buildFileTrees, type ParsedFilePair } from './file-trees';
+import { labelModifiedFile, labelAddedFile, labelDeletedFile } from './match';
+import { joinDiffToAnalysis, countDiff } from './join';
+import { analyzeCommit } from './snapshot';
+import { DifftUnavailableError } from './difftastic';
+
+export interface DiffPipelineInput {
+  repoPath: string;
+  base: string;
+  compare: string;
+  hideTestFiles?: boolean;
+}
+
+/**
+ * Run the full diff pipeline: steps 3 through 9.
+ *
+ * The base is replaced by the merge-base of base and compare, so only what compare added is labelled, as in a pull
+ * request. The result's `base` is that merge-base commit.
+ *
+ * Orchestrates: listing changed TS files with difftastic (step 3), building
+ * tree-sitter parse trees (step 4), extracting diff units and mapping spans
+ * (step 5), labelling declarations as added/deleted/modified/unchanged
+ * (steps 6-7), snapshotting both commits into git worktrees for SCIP
+ * analysis (step 8), then joining labels onto graph nodes (step 9).
+ *
+ * @param input - Pipeline inputs: repoPath, base and compare commit refs,
+ *   and whether to exclude test files.
+ * @returns A DiffResponse: either success with the enriched graph result,
+ *   counts, and unmatched labels, or an error with the appropriate status
+ *   code (BAD_REQUEST, BAD_REF, DIFFT_MISSING, DIFFT_TOO_OLD, or
+ *   ANALYSIS_FAILED).
+ */
+export async function runDiffPipeline(
+  input: DiffPipelineInput,
+): Promise<DiffResponse> {
+  const { repoPath, base, compare, hideTestFiles = true } = input;
+
+  if (!repoPath) {
+    return {
+      success: false,
+      state: 'error',
+      code: 'BAD_REQUEST',
+      error: 'repoPath is required',
+    };
+  }
+
+  // Step 3: List changed TS files with difftastic
+  let changedFiles: ChangedFile[];
+  let baseSha: string;
+  try {
+    baseSha = resolveMergeBase(repoPath, base, compare);
+    changedFiles = await listChangedTsFiles(repoPath, baseSha, compare, { hideTestFiles });
+  } catch (err: unknown) {
+    if (err instanceof DifftUnavailableError) {
+      return {
+        success: false,
+        state: 'error',
+        code: err.code,
+        error: err.message,
+      };
+    }
+
+    const error = err as { message?: string; stderr?: string };
+    // Check for bad ref (git rev-parse failure)
+    if (
+      error.message?.includes('fatal:') ||
+      error.stderr?.includes('fatal:')
+    ) {
+      return {
+        success: false,
+        state: 'error',
+        code: 'BAD_REF',
+        error: `Invalid ref: ${error.stderr || error.message}`,
+      };
+    }
+
+    return {
+      success: false,
+      state: 'error',
+      code: 'ANALYSIS_FAILED',
+      error: error.message || 'Unknown error listing changed files',
+    };
+  }
+
+  // If no TypeScript files changed, analyze compare only and return no-changes
+  if (changedFiles.length === 0) {
+    try {
+      const headAnalysis = await analyzeCommit(repoPath, compare, { hideTestFiles });
+      // All nodes are unchanged
+      const allUnchanged = headAnalysis.nodes.map(n => ({
+        ...n,
+        diffStatus: 'unchanged' as const,
+      }));
+
+      const result: GitAnalysisResult = {
+        nodes: allUnchanged,
+        edges: headAnalysis.edges,
+        metadata: { ...headAnalysis.metadata, repoPath },
+        base: baseSha,
+        head: compare,
+      };
+
+      return {
+        success: true,
+        state: 'no-changes',
+        data: result,
+        counts: { added: 0, modified: 0, deleted: 0 },
+        changedFiles: 0,
+        unmatched: [],
+      };
+    } catch (err: unknown) {
+      const error = err as { message?: string };
+      return {
+        success: false,
+        state: 'error',
+        code: 'ANALYSIS_FAILED',
+        error: error.message || 'Analysis failed',
+      };
+    }
+  }
+
+  // Step 4: Build file trees
+  const filePairs: ParsedFilePair[] = changedFiles.map(buildFileTrees);
+
+  // Step 5-7: Analyze both sides
+  let headAnalysis: AnalysisResult;
+  let baseAnalysis: AnalysisResult;
+
+  try {
+    [headAnalysis, baseAnalysis] = await Promise.all([
+      analyzeCommit(repoPath, compare, { hideTestFiles }),
+      analyzeCommit(repoPath, baseSha, { hideTestFiles }),
+    ]);
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    return {
+      success: false,
+      state: 'error',
+      code: 'ANALYSIS_FAILED',
+      error: error.message || 'Analysis failed',
+    };
+  }
+
+  // Steps 6-9: label declarations and join labels to graph nodes
+  let result: ReturnType<typeof joinDiffToAnalysis>['result'];
+  let unmatched: ReturnType<typeof joinDiffToAnalysis>['unmatched'];
+  try {
+    // Label each file
+    const allLabels: LabelledDeclaration[] = [];
+
+    for (const pair of filePairs) {
+      switch (pair.status) {
+        case 'added':
+          allLabels.push(...labelAddedFile(pair));
+          break;
+        case 'deleted':
+          allLabels.push(...labelDeletedFile(pair));
+          break;
+        case 'modified': {
+          const { labels } = labelModifiedFile(pair);
+          allLabels.push(...labels);
+          break;
+        }
+      }
+    }
+
+    // Step 9: Join labels to graph nodes
+    ({ result, unmatched } = joinDiffToAnalysis(
+      allLabels,
+      headAnalysis,
+      baseAnalysis,
+      { base: baseSha, head: compare },
+    ));
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    return {
+      success: false,
+      state: 'error',
+      code: 'ANALYSIS_FAILED',
+      error: error.message || 'Labelling failed',
+    };
+  }
+
+  const counts = countDiff(result);
+
+  return {
+    success: true,
+    state: 'ok',
+    data: result,
+    counts,
+    changedFiles: changedFiles.length,
+    unmatched,
+  };
+}

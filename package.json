@@ -1,0 +1,60 @@
+{
+  "name": "atlas",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "prebuild": "npm run lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "postinstall": "node scripts/verify-native-bindings.js && node scripts/check-difftastic.js"
+  },
+  "dependencies": {
+    "@c4312/scip": "^0.1.0",
+    "@sourcegraph/scip-typescript": "^0.4.0",
+    "d3-ease": "^3.0.1",
+    "d3-hierarchy": "^3.1.2",
+    "d3-selection": "^3.0.0",
+    "d3-transition": "^3.0.1",
+    "d3-zoom": "^3.0.0",
+    "isomorphic-git": "^1.36.3",
+    "next": "16.1.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "simple-git": "^3.30.0",
+    "tree-sitter": "^0.25.0",
+    "tree-sitter-typescript": "^0.23.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/d3-ease": "^3.0.2",
+    "@types/d3-hierarchy": "^3.1.7",
+    "@types/d3-selection": "^3.0.11",
+    "@types/d3-transition": "^3.0.9",
+    "@types/d3-zoom": "^3.0.8",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "eslint-plugin-jsdoc": "^62.9.0",
+    "eslint-plugin-tsdoc": "^0.5.3",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "tailwindcss": "^4",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5",
+    "whatwg-fetch": "^3.6.20"
+  },
+  "license": "MIT"
+}
